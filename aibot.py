@@ -1,69 +1,81 @@
 import streamlit as st
-from google import genai
-from google.genai import types
-import os #reading environment variables
-from dotenv import load_dotenv #environment variables
+from groq import Groq
+import os
+from dotenv import load_dotenv
 
-load_dotenv() #loads the environment variables
+load_dotenv()
 
-api_key = os.getenv("GOOGLE_API_KEY")
+api_key = os.getenv("GROQ_API_KEY")
 
 st.title("AI Document Assistant")
 
+# initialize the Groq client once and store in session
 if "client" not in st.session_state:
-    st.session_state.client = genai.Client(api_key=api_key)   #st.session_state.client is a variable saved in session
+    st.session_state.client = Groq(api_key=api_key)
 
 with st.sidebar:
     st.header("Setup")
-    uploaded_file_ui = st.file_uploader("Upload your document", type=["pdf", 'txt'])
+    uploaded_file_ui = st.file_uploader("Upload your document", type=["pdf", "txt"])
 
-    if uploaded_file_ui and "doc_ref" not in st.session_state:
+    if uploaded_file_ui and "doc_text" not in st.session_state:
         with st.spinner("Uploading document..."):
-        #we need to check the file type
-            mime_type = uploaded_file_ui.type
+            if uploaded_file_ui.type == "application/pdf":
+                # extract text properly from PDF
+                from pypdf import PdfReader
+                import io
+                reader = PdfReader(io.BytesIO(uploaded_file_ui.read()))
+                st.session_state.doc_text = "\n".join(
+                    page.extract_text() for page in reader.pages if page.extract_text()
+                )
+            else:
+                raw = uploaded_file_ui.read()
+                try:
+                    st.session_state.doc_text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    st.session_state.doc_text = raw.decode("latin-1")
 
-        #writing the bytes to a temporary file
-        with open("temp_doc", "wb") as f: #created a temp_doc file with writing capabilities
-            f.write(uploaded_file_ui.getbuffer())
+    if "doc_text" in st.session_state:
+        st.success("Document uploaded successfully!")
+    else:
+        st.info("Upload a document to get started.")
 
-        doc_ref = st.session_state.client.files.upload(
-            file="temp_doc",
-            config={"mime_type": mime_type}
-        )
-        st.session_state.doc_ref = doc_ref
-
-        st.session_state.chat =st.session_state.client.chats.create(
-            model="gemini-3-flash-preview",
-            config= types.GenerateContentConfig(
-                system_instruction="You are a document expert assistant."
-                                    "Answer questions ONLY using the uploaded file."
-                                    "If the answer isn't there, say you don't know."
-            )
-        )
-    st.success("Document uploaded succesfully!")
 if "messages" not in st.session_state:
-    st.session_state.messages = [] #creating a list of dictionaries where each dictionary is a message contatining a role and content
+    st.session_state.messages = []  # list of dicts with role and content
 
-for msg in st.session_state.messages:    #iterate through the list of dictionaries
-    with st.chat_message(msg["role"]): #create a div block for each role
-        st.markdown(msg["Content"])    #print the content so youre able to see the entire history of the coversation
+# render chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
 prompt = st.chat_input("Ask a question about the uploaded document:")
 if prompt:
-    if "chat" not in st.session_state:
+    if "doc_text" not in st.session_state:
         st.error("Please upload a document first!")
     else:
-        st.session_state.messages.append({"role":"user",
-                                    "content":prompt})
-    with st.chat_message("user",avatar="👨‍💻"):
-        st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
-    with st.chat_message("assistant"):
-        response = st.session_state.chat.send_message(
-            message=[st.session_state.doc_ref, prompt]
-        )
-    st.markdown(response.text)
-    st.session_state.messages.append({"role":"assistant",
-                                      "content":response.text})
+        with st.chat_message("user", avatar="👩‍💻"):
+            st.markdown(prompt)
 
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = st.session_state.client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a document expert assistant. "
+                                "Answer questions ONLY using the document below. "
+                                "If the answer isn't there, say you don't know.\n\n"
+                                f"DOCUMENT:\n{st.session_state.doc_text[:12000]}"
+                            )
+                        }
+                    ] + st.session_state.messages,
+                    max_tokens=500,
+                    temperature=0.3,
+                )
+                reply = response.choices[0].message.content
+            st.markdown(reply)
 
+        st.session_state.messages.append({"role": "assistant", "content": reply})
